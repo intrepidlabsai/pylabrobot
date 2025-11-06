@@ -1,4 +1,5 @@
 import sys
+import asyncio
 from typing import Dict, Optional, List, cast, Union
 import logging
 
@@ -118,11 +119,11 @@ class OpentronsFlexBackend(LiquidHandlerBackend):
     await super().setup()
 
     # create run
-    run_id = ot_api.runs.create()
-    ot_api.set_run(run_id)
+    run_id = await asyncio.to_thread(ot_api.runs.create)
+    await asyncio.to_thread(ot_api.set_run, run_id)
 
     # get pipettes, then assign them
-    self.left_pipette, self.right_pipette = ot_api.lh.add_mounted_pipettes()
+    self.left_pipette, self.right_pipette = await asyncio.to_thread(ot_api.lh.add_mounted_pipettes)
 
     self.left_pipette_has_tip = self.right_pipette_has_tip = False
 
@@ -130,7 +131,7 @@ class OpentronsFlexBackend(LiquidHandlerBackend):
     self.right_pipette_tip_max_vol = None
 
     # get api version
-    health = ot_api.health.get()
+    health = await asyncio.to_thread(ot_api.health.get)
     self.ot_api_version = health["api_version"]
 
   @property
@@ -195,7 +196,7 @@ class OpentronsFlexBackend(LiquidHandlerBackend):
 
     # check if resource is actually a Module
     if isinstance(resource, OpentronsTemperatureModuleV2):
-      ot_api.modules.load_module(
+      await asyncio.to_thread(ot_api.modules.load_module,
         slot=slot,
         model="temperatureModuleV2",
         module_id=resource.backend.opentrons_id
@@ -345,7 +346,7 @@ class OpentronsFlexBackend(LiquidHandlerBackend):
       logger.info(f'Custom grip height found: {resource.grip_height_from_labware_bottom} for resource {resource.name}')
       lw['gripHeightFromLabwareBottom'] = resource.grip_height_from_labware_bottom
 
-    data = ot_api.labware.define(lw)
+    data = await asyncio.to_thread(ot_api.labware.define, lw)
     namespace, definition, version = data["data"]["definitionUri"].split("/")
 
     # assign labware to robot
@@ -365,7 +366,7 @@ class OpentronsFlexBackend(LiquidHandlerBackend):
 
     if isinstance(resource, Adapter):
       # make sure that there is a heater shaker on the requested position
-      modules = ot_api.modules.list_connected_modules()
+      modules = await asyncio.to_thread(ot_api.modules.list_connected_modules)
       avail_hs_modules_info = []
       for idx, mod_info in enumerate(modules):
         if mod_info.get("moduleModel") == "heaterShakerModuleV1":
@@ -376,7 +377,7 @@ class OpentronsFlexBackend(LiquidHandlerBackend):
             hs_id = mod_info.get("id")
             logger.info(f'Heater shaker found in slot {integer_deck_slot} with id: "{hs_id}". Assigning adapter to it.')
 
-            ot_api.labware.add(
+            await asyncio.to_thread(ot_api.labware.add,
               load_name=definition,
               namespace=namespace,
               location={'moduleId': hs_id},
@@ -395,7 +396,7 @@ class OpentronsFlexBackend(LiquidHandlerBackend):
       if isinstance(existing_slot_adapter, Adapter):
         # we have an adaper here, so we need to assign the labware to the adapter
         logger.info(f'Existing adapter found in slot {integer_slot}. Assigning labware {resource.name} to it.')
-        ot_api.labware.add(
+        await asyncio.to_thread(ot_api.labware.add,
           load_name=definition,
           namespace=namespace,
           location={'labwareId': existing_slot_adapter.name},
@@ -404,14 +405,14 @@ class OpentronsFlexBackend(LiquidHandlerBackend):
           display_name=resource.name
         )
       else:
-        ot_api.labware.add(
+        await asyncio.to_thread(ot_api.labware.add,
           load_name=definition,
           namespace=namespace,
-          #slot=slot,
           location=location,
           version=version,
           labware_id=labware_uuid,
-          display_name=resource.name)
+          display_name=resource.name
+        )
 
     self.defined_labware[resource.name] = labware_uuid
 
@@ -436,7 +437,7 @@ class OpentronsFlexBackend(LiquidHandlerBackend):
     # The OT-api does not support removing labware definitions
     # https://forums.pylabrobot.org/t/feature-request-support-unloading-labware-in-the-http-api/3098
     # instead, we move the labware off deck as a workaround
-    ot_api.labware.move_labware(labware_id=name, off_deck=True)
+    await asyncio.to_thread(ot_api.labware.move_labware, labware_id=name, off_deck=True)
 
   def select_tip_pipette(self, tip_max_volume: float, with_tip: bool) -> Optional[str]:
     """ Select a pipette based on maximum tip volume for tip pick up or drop.
@@ -500,7 +501,7 @@ class OpentronsFlexBackend(LiquidHandlerBackend):
     logger.info('Using a flex z offset to pick up tips')
     offset_z+= 90
 
-    ot_api.lh.pick_up_tip(labware_id, well_name=op.resource.name, pipette_id=pipette_id,
+    await asyncio.to_thread(ot_api.lh.pick_up_tip, labware_id, well_name=op.resource.name, pipette_id=pipette_id,
       offset_x=offset_x, offset_y=offset_y, offset_z=offset_z)
 
     if pipette_id == self.left_pipette["pipetteId"]:
@@ -555,22 +556,22 @@ class OpentronsFlexBackend(LiquidHandlerBackend):
     offset_z += 10
 
     if use_fixed_trash:
-      ot_api.lh.retract_pipette_z_axis(pipette_mount=pipette)
-      ot_api.lh.move_to_coords(
+      await asyncio.to_thread(ot_api.lh.retract_pipette_z_axis, pipette_mount=pipette)
+      await asyncio.to_thread(ot_api.lh.move_to_coords,
         x=self.fixed_trash_coords['x'],
         y=self.fixed_trash_coords['y'],
         z=self.fixed_trash_coords['z'],
         pipette_id=pipette_id,
       )
-      ot_api.lh.move_to_coords(
+      await asyncio.to_thread(ot_api.lh.move_to_coords,
         x=self.fixed_trash_coords['x'],
         y=self.fixed_trash_coords['y'],
         z=self.fixed_trash_coords['z'] - 40.,
         pipette_id=pipette_id,
       )
-      ot_api.lh.drop_tip_in_place(pipette_id=pipette_id)
+      await asyncio.to_thread(ot_api.lh.drop_tip_in_place, pipette_id=pipette_id)
     else:
-      ot_api.lh.drop_tip(labware_id, well_name=op.resource.name, pipette_id=pipette_id,
+      await asyncio.to_thread(ot_api.lh.drop_tip, labware_id, well_name=op.resource.name, pipette_id=pipette_id,
         offset_x=offset_x, offset_y=offset_y, offset_z=offset_z)
 
     if self.left_pipette is not None and pipette_id == self.left_pipette["pipetteId"]:
@@ -673,10 +674,10 @@ class OpentronsFlexBackend(LiquidHandlerBackend):
     offset_z -= self._tip_to_asp_disp_z_offset(tip_max_vol)
 
     # Fix collisions after blowout?
-    ot_api.lh.move_to_well(labware_id, well_name=op.resource.name, pipette_id=pipette_id,
+    await asyncio.to_thread(ot_api.lh.move_to_well, labware_id, well_name=op.resource.name, pipette_id=pipette_id,
       offset_x=offset_x, offset_y=offset_y, offset_z=offset_z)
 
-    ot_api.lh.aspirate(labware_id, well_name=op.resource.name, pipette_id=pipette_id,
+    await asyncio.to_thread(ot_api.lh.aspirate, labware_id, well_name=op.resource.name, pipette_id=pipette_id,
       volume=volume, flow_rate=flow_rate, offset_x=offset_x, offset_y=offset_y, offset_z=offset_z)
 
   def _get_default_dispense_flow_rate(self, pipette_name: str) -> float:
@@ -738,12 +739,12 @@ class OpentronsFlexBackend(LiquidHandlerBackend):
     # fixed z dimension offsert for aspirate and dispense ops
     offset_z -= self._tip_to_asp_disp_z_offset(tip_max_vol)
 
-    ot_api.lh.dispense(labware_id, well_name=op.resource.name, pipette_id=pipette_id,
+    await asyncio.to_thread(ot_api.lh.dispense, labware_id, well_name=op.resource.name, pipette_id=pipette_id,
       volume=volume, flow_rate=flow_rate, offset_x=offset_x, offset_y=offset_y, offset_z=offset_z, push_out=push_out)
 
   async def home(self):
     """ Home the robot """
-    ot_api.health.home()
+    await asyncio.to_thread(ot_api.health.home)
 
   async def pick_up_tips96(self, pickup: PickupTipRack):
     raise NotImplementedError("The Opentrons backend does not support the CoRe 96.")
@@ -791,12 +792,12 @@ class OpentronsFlexBackend(LiquidHandlerBackend):
     else:
       raise ValueError
 
-    ot_api.lh.home_gripper()
+    await asyncio.to_thread(ot_api.lh.home_gripper)
 
     # catch RuntimeErrors and handle them gracefully to prevent code from breaking
     try:
       # call to opentrons api to make the move
-      ot_api.lh.move_labware(
+      await asyncio.to_thread(ot_api.lh.move_labware,
         labware_id=self.defined_labware[resource.name],
         new_location=new_location,
         pickup_offset_x=pickup_offset_x,
@@ -815,7 +816,7 @@ class OpentronsFlexBackend(LiquidHandlerBackend):
 
   async def list_connected_modules(self) -> List[dict]:
     """ List all connected temperature modules. """
-    return cast(List[dict], ot_api.modules.list_connected_modules())
+    return cast(List[dict], await asyncio.to_thread(ot_api.modules.list_connected_modules))
 
   async def move_pipette_head(
     self,
@@ -846,7 +847,7 @@ class OpentronsFlexBackend(LiquidHandlerBackend):
     if pipette_id is None:
       raise ValueError("No pipette id given or left/right pipette not available.")
 
-    ot_api.lh.move_arm(
+    await asyncio.to_thread(ot_api.lh.move_arm,
       pipette_id=pipette_id,
       location_x=location.x,
       location_y=location.y,
@@ -860,7 +861,7 @@ class OpentronsFlexBackend(LiquidHandlerBackend):
   async def safe_move_gantry(self):
     """ Move the gantry to a safe position. """
 
-    ot_api.lh.move_to_coords(
+    await asyncio.to_thread(ot_api.lh.move_to_coords,
       x=200.0,
       y=200.0,
       z=250.0,
