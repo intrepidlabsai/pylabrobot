@@ -335,6 +335,10 @@ class OpentronsFlexBackend(LiquidHandlerBackend):
           },
       }
 
+    # allow any resource to declare custom stacking offsets (e.g. custom adapters)
+    if hasattr(resource, 'stacking_offset_with_labware') and resource.stacking_offset_with_labware:
+      lw.setdefault('stackingOffsetWithLabware', {}).update(resource.stacking_offset_with_labware)
+
     if isinstance(resource, Adapter):
       lw['allowedRoles'] = ['adapter']
 
@@ -365,12 +369,13 @@ class OpentronsFlexBackend(LiquidHandlerBackend):
       raise ValueError(f"Unknown slot type: {slot}")
 
     if isinstance(resource, Adapter):
-      # make sure that there is a heater shaker on the requested position
+      # Check for a heater shaker at the requested slot first.
+      # If none is found, fall back to loading the adapter directly on the deck
+      # (supports custom non-module adapters such as 3D-printed risers).
       modules = await asyncio.to_thread(ot_api.modules.list_connected_modules)
-      avail_hs_modules_info = []
+      hs_found = False
       for idx, mod_info in enumerate(modules):
         if mod_info.get("moduleModel") == "heaterShakerModuleV1":
-          #avail_hs_modules_info.append(mod_info)
           deck_slot_matrix = mod_info.get("moduleOffset").get("slot")
           integer_deck_slot = self.convert_matrix_deck_slot_to_integer(deck_slot_matrix)
           if integer_deck_slot == slot:
@@ -386,6 +391,21 @@ class OpentronsFlexBackend(LiquidHandlerBackend):
               display_name=resource.name
             )
             self.deck.adapter_slots[slot-1] = resource
+            hs_found = True
+            break
+
+      if not hs_found:
+        # No heater shaker at this slot — load adapter directly on the deck.
+        logger.info(f'No heater shaker found in slot {slot}. Loading adapter {resource.name} directly on deck.')
+        await asyncio.to_thread(ot_api.labware.add,
+          load_name=definition,
+          namespace=namespace,
+          location=location,
+          version=version,
+          labware_id=labware_uuid,
+          display_name=resource.name
+        )
+        self.deck.adapter_slots[slot-1] = resource
     else:
       try:
         integer_slot = self.convert_matrix_deck_slot_to_integer(slot)
