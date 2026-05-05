@@ -144,7 +144,12 @@ class VolumeTracker:
   def rollback(self) -> None:
     """ Rollback the pending operations. """
     assert not self.is_disabled, "Volume tracker is disabled. Call `enable()`."
-    self.pending_liquids.clear()
+    # Restore `pending_liquids` from the last committed state instead of
+    # clearing it. Clearing leaves `get_used_volume()` reporting 0 uL --
+    # which breaks any retry that checks the source after a failed
+    # aspirate/dispense (e.g. TooLittleLiquidError on the next aspirate
+    # from a reservoir that is actually still full).
+    self.pending_liquids = copy.deepcopy(self.liquids)
 
   def serialize(self) -> dict:
     """ Serialize the volume tracker. """
