@@ -43,7 +43,7 @@ logger = logging.getLogger("pylabrobot")
 
 PYTHON_VERSION = sys.version_info[:2]
 
-if PYTHON_VERSION == (3, 10):
+if PYTHON_VERSION in ((3, 10), (3, 11)):
   try:
     import ot_api
     USE_OT = True
