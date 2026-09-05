@@ -61,6 +61,7 @@ logger = logging.getLogger("pylabrobot")
 def convert_move_to_types(
     to: Union[int, str],
     platform_present: bool = True,
+    platform_slot: int = 2,
 ) -> Union[
     DeckSlotMoveTo,
     StagingSlotMoveTo,
@@ -68,7 +69,13 @@ def convert_move_to_types(
     AdapterMoveTo,
     TransferPlatformMoveTo,
 ]:
-  """ """
+  """Resolve a 'to' deck location to a move-to type.
+
+  ``platform_slot`` is the 1-indexed deck slot that carries the transfer platform
+  (where an external arm hands plates off). It defaults to 2 for backwards
+  compatibility; pass a different value (e.g. 3) for cells that mount the platform
+  elsewhere.
+  """
   if not isinstance(to, (int, str, Adapter)):
     raise ValueError(f"Invalid move 'to' type requested: {to}")
 
@@ -77,8 +84,8 @@ def convert_move_to_types(
   try:
     int_to = int(to)
     if 1 <= int_to <= 12:
-      if int_to == 2 and platform_present:
-        return TransferPlatformMoveTo()
+      if int_to == platform_slot and platform_present:
+        return TransferPlatformMoveTo(loc=platform_slot)
       return DeckSlotMoveTo(loc=int_to)
     elif 13 <= int_to <= 16:
       return StagingSlotMoveTo(loc=int_to)
@@ -1653,20 +1660,28 @@ class LiquidHandler(Machine):
       drop_offset_y: Optional[float]=0.,
       drop_offset_z: Optional[float]=0.,
       platform_present: bool = True,
+      platform_slot: int = 2,
   ):
-      """ Move a labware to a new location. """
+      """ Move a labware to a new location.
+
+      ``platform_slot`` is the 1-indexed deck slot carrying the transfer platform
+      (default 2). Picking up from that slot adds the platform elevation offset, and
+      moving to it is routed as a TransferPlatformMoveTo.
+      """
 
       # handle any parameterization of the pickup (from)
       current_slot = self.deck.get_slot(resource)
       if current_slot is None:
         raise ValueError("Resource is not on the deck")
 
-      if current_slot == 2 and platform_present:
+      if current_slot == platform_slot and platform_present:
         # add offset for pickup from the platform
-        pickup_offset_z += TransferPlatformMoveTo().height
+        pickup_offset_z += TransferPlatformMoveTo(loc=platform_slot).height
 
       # try to get the move to type from the "to" argument
-      to_obj = convert_move_to_types(to, platform_present=platform_present)
+      to_obj = convert_move_to_types(
+        to, platform_present=platform_present, platform_slot=platform_slot
+      )
 
       logger.info(f'Moving {resource} from {current_slot} to {to_obj} with pickup offset {pickup_offset_z}')
 
