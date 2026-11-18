@@ -1,3 +1,4 @@
+import copy
 import math
 import json
 from typing import Union, List, TYPE_CHECKING, cast
@@ -150,7 +151,7 @@ def ot_definition_to_resource(
                 stacking_labware_with_offset = data['stackingOffsetWithLabware']
             else:
                 stacking_labware_with_offset = None
-            return Plate(
+            resource = Plate(
                 name=name,
                 size_x=size_x,
                 size_y=size_y,
@@ -162,7 +163,7 @@ def ot_definition_to_resource(
                 grip_height_from_labware_bottom=grip_height_from_labware_bottom,
             )
         elif display_category == "reservoir":
-            return Plate(
+            resource = Plate(
                 name=name,
                 size_x=size_x,
                 size_y=size_y,
@@ -173,7 +174,7 @@ def ot_definition_to_resource(
                 grip_height_from_labware_bottom=grip_height_from_labware_bottom,
             )
         elif display_category == "tipRack":
-            return TipRack(
+            resource = TipRack(
                 name=name,
                 size_x=size_x,
                 size_y=size_y,
@@ -184,7 +185,7 @@ def ot_definition_to_resource(
                 grip_height_from_labware_bottom=grip_height_from_labware_bottom,
             )
         elif display_category == "tubeRack":
-            return TubeRack(
+            resource = TubeRack(
                 name=name,
                 size_x=size_x,
                 size_y=size_y,
@@ -195,7 +196,7 @@ def ot_definition_to_resource(
                 grip_height_from_labware_bottom=grip_height_from_labware_bottom,
             )
         elif display_category == "adapter":
-            return Adapter(
+            resource = Adapter(
                 name=name,
                 size_x=size_x,
                 size_y=size_y,
@@ -203,6 +204,10 @@ def ot_definition_to_resource(
                 items=cast(List[List[Well]], wells),
                 model=data["metadata"]["displayName"],
             )
+        else:
+            raise UnknownResourceType(f"Unknown resource type '{display_category}'.")
+        resource.ot_definition = copy.deepcopy(data)
+        return resource
     raise UnknownResourceType(f"Unknown resource type '{display_category}'.")
 
 

@@ -1,4 +1,5 @@
 import sys
+import copy
 import asyncio
 from typing import Dict, Optional, List, cast, Union
 import logging
@@ -22,7 +23,8 @@ from pylabrobot.resources import (
   Plate,
   Resource,
   TipRack,
-  TipSpot
+  TipSpot,
+  TubeRack,
 )
 from pylabrobot.resources.opentrons_flex import OTDeck
 from pylabrobot.temperature_controlling import OpentronsTemperatureModuleV2
@@ -43,7 +45,7 @@ logger = logging.getLogger("pylabrobot")
 
 PYTHON_VERSION = sys.version_info[:2]
 
-if PYTHON_VERSION == (3, 10):
+if PYTHON_VERSION in ((3, 10), (3, 11)):
   try:
     import ot_api
     USE_OT = True
@@ -90,12 +92,18 @@ class OpentronsFlexBackend(LiquidHandlerBackend):
 
 
 
-  def __init__(self, host: str, port: int = 31950):
+  def __init__(self, host: str, port: int = 31950, upload_source_definitions: bool = False):
+    """
+    Args:
+      upload_source_definitions: upload the Opentrons definition a resource was loaded from
+        (``resource.ot_definition``) instead of rebuilding one from the PyLabRobot resource.
+        Tip racks and resources without one are still rebuilt.
+    """
     super().__init__()
 
     if not USE_OT:
       raise RuntimeError("Opentrons is not installed. Please run pip install pylabrobot[opentrons]."
-                         " Only supported on Python 3.10 and below.")
+                         " Only supported on Python 3.10 and 3.11.")
 
     self.host = host
     self.port = port
@@ -103,7 +111,9 @@ class OpentronsFlexBackend(LiquidHandlerBackend):
     ot_api.set_host(host)
     ot_api.set_port(port)
 
+    self.upload_source_definitions = upload_source_definitions
     self.defined_labware: Dict[str, str] = {}
+    self._ot_well_names: Dict[str, str] = {}
     self.ot_api_version: Optional[str] = None
     self.left_pipette: Optional[Dict[str, str]] = None
     self.right_pipette: Optional[Dict[str, str]] = None
@@ -112,7 +122,8 @@ class OpentronsFlexBackend(LiquidHandlerBackend):
     return {
       **super().serialize(),
       "host": self.host,
-      "port": self.port
+      "port": self.port,
+      "upload_source_definitions": self.upload_source_definitions,
     }
 
   async def setup(self):
@@ -204,6 +215,121 @@ class OpentronsFlexBackend(LiquidHandlerBackend):
       # call self to assign the tube rack
       await self.assigned_resource_callback(resource.tube_rack)
       return
+
+    source = getattr(resource, "ot_definition", None) if self.upload_source_definitions else None
+    # tip pickup (offset_z += 90) and aspirate/dispense heights are tuned to the rebuilt tip rack
+    if source is not None and not isinstance(resource, TipRack):
+      lw = self._definition_from_source(resource, source)
+    else:
+      lw = self._definition_from_resource(resource)
+
+    data = await asyncio.to_thread(ot_api.labware.define, lw)
+    namespace, definition, version = data["data"]["definitionUri"].split("/")
+
+    # assign labware to robot
+    labware_uuid = resource.name
+
+    # handle the slot name for the opentrons api backend
+    slot_obj = convert_move_to_types(slot)
+    if isinstance(slot_obj, DeckSlotMoveTo):
+      location = {'slotName': str(slot_obj.loc)}
+    elif isinstance(slot_obj, StagingSlotMoveTo):
+      location = {'addressableAreaName': slot_obj.matrix_loc}
+      slot = slot_obj.matrix_loc
+    elif isinstance(slot_obj, TransferPlatformMoveTo):
+      location = {'slotName': str(slot_obj.loc)}
+    else:
+      raise ValueError(f"Unknown slot type: {slot}")
+
+    if isinstance(resource, Adapter):
+      # make sure that there is a heater shaker on the requested position
+      modules = await asyncio.to_thread(ot_api.modules.list_connected_modules)
+      avail_hs_modules_info = []
+      for idx, mod_info in enumerate(modules):
+        if mod_info.get("moduleModel") == "heaterShakerModuleV1":
+          #avail_hs_modules_info.append(mod_info)
+          deck_slot_matrix = mod_info.get("moduleOffset").get("slot")
+          integer_deck_slot = self.convert_matrix_deck_slot_to_integer(deck_slot_matrix)
+          if integer_deck_slot == slot:
+            hs_id = mod_info.get("id")
+            logger.info(f'Heater shaker found in slot {integer_deck_slot} with id: "{hs_id}". Assigning adapter to it.')
+
+            await asyncio.to_thread(ot_api.labware.add,
+              load_name=definition,
+              namespace=namespace,
+              location={'moduleId': hs_id},
+              version=version,
+              labware_id=labware_uuid,
+              display_name=resource.name
+            )
+            self.deck.adapter_slots[slot-1] = resource
+    else:
+      try:
+        integer_slot = self.convert_matrix_deck_slot_to_integer(slot)
+      except TypeError:
+        integer_slot = slot
+
+      existing_slot_adapter = self.deck.adapter_slots[integer_slot-1]
+      if isinstance(existing_slot_adapter, Adapter):
+        # we have an adaper here, so we need to assign the labware to the adapter
+        logger.info(f'Existing adapter found in slot {integer_slot}. Assigning labware {resource.name} to it.')
+        await asyncio.to_thread(ot_api.labware.add,
+          load_name=definition,
+          namespace=namespace,
+          location={'labwareId': existing_slot_adapter.name},
+          labware_id=labware_uuid,
+          version=version,
+          display_name=resource.name
+        )
+      else:
+        await asyncio.to_thread(ot_api.labware.add,
+          load_name=definition,
+          namespace=namespace,
+          location=location,
+          version=version,
+          labware_id=labware_uuid,
+          display_name=resource.name
+        )
+
+    self.defined_labware[resource.name] = labware_uuid
+
+
+  def _definition_from_source(self, resource: Resource, source: dict) -> dict:
+    """ Upload the Opentrons definition the resource was loaded from, unchanged except for its
+    identity.
+
+    The namespace is always ``pylabrobot`` so a copy that reuses an official load name never
+    collides with the robot's built-in definition. Labware gets the resource name as load name
+    (a unique URI per instance, since callers may adjust geometry per instance, e.g. platform
+    elevation); adapters keep their source load name because other definitions refer to it in
+    ``stackingOffsetWithLabware``.
+    """
+
+    lw = copy.deepcopy(source)
+    lw["namespace"] = "pylabrobot"
+    lw["metadata"]["displayName"] = resource.name
+    if not isinstance(resource, Adapter):
+      lw["parameters"]["loadName"] = resource.name
+
+    prefix = f"{resource.name}_"
+    for child in resource.children:
+      well = child.name[len(prefix):] if child.name.startswith(prefix) else child.name
+      if well not in lw["wells"]:
+        raise ValueError(f"{child.name!r} has no well in the definition of {resource.name!r}")
+      self._ot_well_names[child.name] = well
+
+    return lw
+
+  def _ot_well_name(self, resource: Resource) -> str:
+    return self._ot_well_names.get(resource.name, resource.name)
+
+  def offsets_from_center(self, resource: Resource) -> bool:
+    """ Wells of a definition uploaded as written: the robot measures from the Opentrons well
+    center, which the loader also uses as the well's location. """
+    return resource.name in self._ot_well_names
+
+  def _definition_from_resource(self, resource: Resource) -> dict:
+    """ Build an Opentrons labware definition from the PyLabRobot resource. """
 
     well_names = [well.name for well in resource.children]
     if isinstance(resource, ItemizedResource):
@@ -300,8 +426,8 @@ class OpentronsFlexBackend(LiquidHandlerBackend):
       ]
     }
 
-    # add optional stacking labware with offset for well plates
-    if isinstance(resource, Plate):
+    # add optional stacking labware with offset for well plates and tube racks
+    if isinstance(resource, (Plate, TubeRack)):
       lw['stackingOffsetWithLabware'] = {
         "opentrons_universal_flat_adapter": {
           "x": 0.0,
@@ -346,75 +472,7 @@ class OpentronsFlexBackend(LiquidHandlerBackend):
       logger.info(f'Custom grip height found: {resource.grip_height_from_labware_bottom} for resource {resource.name}')
       lw['gripHeightFromLabwareBottom'] = resource.grip_height_from_labware_bottom
 
-    data = await asyncio.to_thread(ot_api.labware.define, lw)
-    namespace, definition, version = data["data"]["definitionUri"].split("/")
-
-    # assign labware to robot
-    labware_uuid = resource.name
-
-    # handle the slot name for the opentrons api backend
-    slot_obj = convert_move_to_types(slot)
-    if isinstance(slot_obj, DeckSlotMoveTo):
-      location = {'slotName': str(slot_obj.loc)}
-    elif isinstance(slot_obj, StagingSlotMoveTo):
-      location = {'addressableAreaName': slot_obj.matrix_loc}
-      slot = slot_obj.matrix_loc
-    elif isinstance(slot_obj, TransferPlatformMoveTo):
-      location = {'slotName': str(slot_obj.loc)}
-    else:
-      raise ValueError(f"Unknown slot type: {slot}")
-
-    if isinstance(resource, Adapter):
-      # make sure that there is a heater shaker on the requested position
-      modules = await asyncio.to_thread(ot_api.modules.list_connected_modules)
-      avail_hs_modules_info = []
-      for idx, mod_info in enumerate(modules):
-        if mod_info.get("moduleModel") == "heaterShakerModuleV1":
-          #avail_hs_modules_info.append(mod_info)
-          deck_slot_matrix = mod_info.get("moduleOffset").get("slot")
-          integer_deck_slot = self.convert_matrix_deck_slot_to_integer(deck_slot_matrix)
-          if integer_deck_slot == slot:
-            hs_id = mod_info.get("id")
-            logger.info(f'Heater shaker found in slot {integer_deck_slot} with id: "{hs_id}". Assigning adapter to it.')
-
-            await asyncio.to_thread(ot_api.labware.add,
-              load_name=definition,
-              namespace=namespace,
-              location={'moduleId': hs_id},
-              version=version,
-              labware_id=labware_uuid,
-              display_name=resource.name
-            )
-            self.deck.adapter_slots[slot-1] = resource
-    else:
-      try:
-        integer_slot = self.convert_matrix_deck_slot_to_integer(slot)
-      except TypeError:
-        integer_slot = slot
-
-      existing_slot_adapter = self.deck.adapter_slots[integer_slot-1]
-      if isinstance(existing_slot_adapter, Adapter):
-        # we have an adaper here, so we need to assign the labware to the adapter
-        logger.info(f'Existing adapter found in slot {integer_slot}. Assigning labware {resource.name} to it.')
-        await asyncio.to_thread(ot_api.labware.add,
-          load_name=definition,
-          namespace=namespace,
-          location={'labwareId': existing_slot_adapter.name},
-          labware_id=labware_uuid,
-          version=version,
-          display_name=resource.name
-        )
-      else:
-        await asyncio.to_thread(ot_api.labware.add,
-          load_name=definition,
-          namespace=namespace,
-          location=location,
-          version=version,
-          labware_id=labware_uuid,
-          display_name=resource.name
-        )
-
-    self.defined_labware[resource.name] = labware_uuid
+    return lw
 
 
   @staticmethod
@@ -501,7 +559,7 @@ class OpentronsFlexBackend(LiquidHandlerBackend):
     logger.info('Using a flex z offset to pick up tips')
     offset_z+= 90
 
-    await asyncio.to_thread(ot_api.lh.pick_up_tip, labware_id, well_name=op.resource.name, pipette_id=pipette_id,
+    await asyncio.to_thread(ot_api.lh.pick_up_tip, labware_id, well_name=self._ot_well_name(op.resource), pipette_id=pipette_id,
       offset_x=offset_x, offset_y=offset_y, offset_z=offset_z)
 
     if pipette_id == self.left_pipette["pipetteId"]:
@@ -571,7 +629,7 @@ class OpentronsFlexBackend(LiquidHandlerBackend):
       )
       await asyncio.to_thread(ot_api.lh.drop_tip_in_place, pipette_id=pipette_id)
     else:
-      await asyncio.to_thread(ot_api.lh.drop_tip, labware_id, well_name=op.resource.name, pipette_id=pipette_id,
+      await asyncio.to_thread(ot_api.lh.drop_tip, labware_id, well_name=self._ot_well_name(op.resource), pipette_id=pipette_id,
         offset_x=offset_x, offset_y=offset_y, offset_z=offset_z)
 
     if self.left_pipette is not None and pipette_id == self.left_pipette["pipetteId"]:
@@ -674,10 +732,10 @@ class OpentronsFlexBackend(LiquidHandlerBackend):
     offset_z -= self._tip_to_asp_disp_z_offset(tip_max_vol)
 
     # Fix collisions after blowout?
-    await asyncio.to_thread(ot_api.lh.move_to_well, labware_id, well_name=op.resource.name, pipette_id=pipette_id,
+    await asyncio.to_thread(ot_api.lh.move_to_well, labware_id, well_name=self._ot_well_name(op.resource), pipette_id=pipette_id,
       offset_x=offset_x, offset_y=offset_y, offset_z=offset_z)
 
-    await asyncio.to_thread(ot_api.lh.aspirate, labware_id, well_name=op.resource.name, pipette_id=pipette_id,
+    await asyncio.to_thread(ot_api.lh.aspirate, labware_id, well_name=self._ot_well_name(op.resource), pipette_id=pipette_id,
       volume=volume, flow_rate=flow_rate, offset_x=offset_x, offset_y=offset_y, offset_z=offset_z)
 
   def _get_default_dispense_flow_rate(self, pipette_name: str) -> float:
@@ -739,12 +797,24 @@ class OpentronsFlexBackend(LiquidHandlerBackend):
     # fixed z dimension offsert for aspirate and dispense ops
     offset_z -= self._tip_to_asp_disp_z_offset(tip_max_vol)
 
-    await asyncio.to_thread(ot_api.lh.dispense, labware_id, well_name=op.resource.name, pipette_id=pipette_id,
+    await asyncio.to_thread(ot_api.lh.dispense, labware_id, well_name=self._ot_well_name(op.resource), pipette_id=pipette_id,
       volume=volume, flow_rate=flow_rate, offset_x=offset_x, offset_y=offset_y, offset_z=offset_z, push_out=push_out)
 
   async def home(self):
-    """ Home the robot """
-    await asyncio.to_thread(ot_api.health.home)
+    """ Home the robot: Z first, then Y to the back, then everything.
+
+    The robot's own order (Z, X, Y) drives X across the deck at whatever Y the gantry is at; from
+    the front of the Y travel the pipette carriage hits the back of the touchscreen.
+    """
+    from ot_api.decorators import command
+
+    @command
+    def home_axes(axes: Optional[List[str]], run_id: Optional[str] = None):
+      params = {} if axes is None else {"axes": axes}
+      return ot_api.runs.enqueue_command("home", params, intent="setup", run_id=run_id)
+
+    for axes in (["leftZ", "rightZ", "extensionZ"], ["y"], None):
+      await asyncio.to_thread(home_axes, axes)
 
   async def pick_up_tips96(self, pickup: PickupTipRack):
     raise NotImplementedError("The Opentrons backend does not support the CoRe 96.")

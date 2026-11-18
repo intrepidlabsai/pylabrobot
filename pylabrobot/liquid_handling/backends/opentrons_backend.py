@@ -36,7 +36,7 @@ from pylabrobot.liquid_handling.liquid_handler import (
 
 PYTHON_VERSION = sys.version_info[:2]
 
-if PYTHON_VERSION == (3, 10):
+if PYTHON_VERSION in ((3, 10), (3, 11)):
   try:
     import ot_api
     USE_OT = True
@@ -51,7 +51,7 @@ _OT_DECK_IS_ADDRESSABLE_AREA_VERSION = "7.1.0"
 
 
 class OpentronsBackend(LiquidHandlerBackend):
-  """ Backends for the Opentrons liquid handling robots. Only supported on Python 3.10.
+  """ Backends for the Opentrons liquid handling robots. Supported on Python 3.10 and 3.11.
   """
 
   fixed_trash_coords = {
@@ -84,7 +84,7 @@ class OpentronsBackend(LiquidHandlerBackend):
 
     if not USE_OT:
       raise RuntimeError("Opentrons is not installed. Please run pip install pylabrobot[opentrons]."
-                         " Only supported on Python 3.10 and below.")
+                         " Only supported on Python 3.10 and 3.11.")
 
     self.host = host
     self.port = port

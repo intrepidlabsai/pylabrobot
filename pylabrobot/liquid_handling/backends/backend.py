@@ -59,6 +59,11 @@ class LiquidHandlerBackend(MachineBackend, metaclass=ABCMeta):
       resource: The resource that was assigned to the robot.
     """
 
+  def offsets_from_center(self, resource: Resource) -> bool:
+    """ Whether the robot already measures offsets on ``resource`` from its center, so the
+    LiquidHandler must not add the center itself. """
+    return False
+
   async def unassigned_resource_callback(self, name: str):
     """ Called when a resource is unassigned from the robot.
 

@@ -279,6 +279,22 @@ class TestLiquidHandlerCommands(unittest.IsolatedAsyncioTestCase):
         "use_channels": [0], "ops": [
           Drop(tip_spot, tip=tip, offset=Coordinate(x=1, y=1, z=1))]}})
 
+  async def test_backend_offsets_from_center(self):
+    well = self.plate.get_item("A1")
+    await self.lh.pick_up_tips([self.tip_rack.get_item("A1")])
+    with unittest.mock.patch.object(self.backend, "offsets_from_center", return_value=True):
+      await self.lh.aspirate(well, vols=10, offsets=[Coordinate(0, 0, 1)])
+      await self.lh.dispense(well, vols=10, offsets=[Coordinate(0, 0, 1)])
+    await self.lh.aspirate(well, vols=10, offsets=[Coordinate(0, 0, 1)])
+
+    offsets = [c["kwargs"]["ops"][0].offset for c in self.backend.commands_received
+               if c["command"] in ("aspirate", "dispense")]
+    self.assertEqual(offsets, [
+      Coordinate(0, 0, 1),
+      Coordinate(0, 0, 1),
+      Coordinate(well.get_size_x() / 2, well.get_size_y() / 2, 1),
+    ])
+
   async def test_with_use_channels(self):
     tip_spot = self.tip_rack.get_item("A1")
     tip = tip_spot.get_tip()

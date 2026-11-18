@@ -751,7 +751,10 @@ class LiquidHandler(Machine):
       # If offsets is supplied, make sure it is a list of the correct length. If it is not in this
       # format, raise an error. If it is not supplied, make it a list of the correct length by
       # spreading channels across the resource evenly.
-      center_offsets = list(reversed(resources.centers(yn=n, zn=0)))
+      if self.backend.offsets_from_center(resources):
+        center_offsets = [Coordinate.zero()] * n
+      else:
+        center_offsets = list(reversed(resources.centers(yn=n, zn=0)))
       if offsets is not None:
         if not isinstance(offsets, list) or len(offsets) != n:
           raise ValueError("Number of offsets must match number of channels used when aspirating "
@@ -932,7 +935,10 @@ class LiquidHandler(Machine):
       # If offsets is supplied, make sure it is a list of the correct length. If it is not in this
       # format, raise an error. If it is not supplied, make it a list of the correct length by
       # spreading channels across the resource evenly.
-      center_offsets = list(reversed(resources.centers(yn=n, zn=0)))
+      if self.backend.offsets_from_center(resources):
+        center_offsets = [Coordinate.zero()] * n
+      else:
+        center_offsets = list(reversed(resources.centers(yn=n, zn=0)))
       if offsets is not None:
         if not isinstance(offsets, list) or len(offsets) != n:
           raise ValueError("Number of offsets must match number of channels used when dispensing "
